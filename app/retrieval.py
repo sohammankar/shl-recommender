@@ -2,7 +2,7 @@
 retrieval.py — Catalog loading and semantic search
 
 WHY THIS DESIGN (for the interview):
-- We use a local sentence-transformer model (all-MiniLM-L6-v2) rather than
+- We use a local sentence-transformer model (paraphrase-MiniLM-L3-v2) rather than
   a paid embeddings API for three reasons:
     1. Zero cost and no rate-limit risk during automated grading (which may
        fire many calls in parallel).
@@ -47,7 +47,7 @@ def _get_model():
     global _model
     if _model is None:
         from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
+        _model = SentenceTransformer("paraphrase-MiniLM-L3-v2")
     return _model
 
 
