@@ -2,61 +2,88 @@
 retrieval.py — Catalog loading and semantic search
 
 WHY THIS DESIGN (for the interview):
-- We use a local sentence-transformer model (paraphrase-MiniLM-L3-v2) rather than
-  a paid embeddings API for three reasons:
-    1. Zero cost and no rate-limit risk during automated grading (which may
-       fire many calls in parallel).
-    2. The catalog is only 377 items — embedding them locally takes ~2 seconds
-       at startup and fits in ~10 MB of RAM.
-    3. Removes one network dependency from the hot path; retrieval still works
-       even if the LLM provider is briefly unavailable.
+- We use the HuggingFace Inference API for embeddings rather than loading
+  a local sentence-transformer model. This is a deliberate architectural
+  choice for deployment on constrained free-tier infrastructure (512MB RAM):
+  the all-MiniLM-L6-v2 model + PyTorch requires ~600MB RAM at startup,
+  which exceeds Render's free tier limit. The HF Inference API runs the
+  same model in HF's cloud — identical vectors, zero local RAM cost.
 
-- We use FAISS (flat L2 index, brute-force) rather than HNSW or IVF because
-  377 vectors makes approximate search pointless — exact search over 377
-  items is faster than the overhead of an approximate algorithm, and it
-  guarantees we never miss the correct result due to index approximation.
+- We use FAISS flat index (exact search) for 377 items. Approximate
+  algorithms like HNSW add complexity with no benefit at this scale.
 
-- We build a rich text representation per catalog item that concatenates
-  name, description, category labels, and job levels. This is the "context
-  engineering" part: if a user says "senior leadership", the job_levels
-  field in the embedded text carries that signal even if the product's
-  description doesn't use the word "leadership".
+- Hybrid search: 70% semantic (cosine similarity via FAISS) + 30% keyword
+  (TF-IDF term frequency). Semantic handles paraphrased queries; keyword
+  anchors exact product-name queries like "OPQ32r" or "Verify G+".
 
-- We also expose keyword_search() (BM25-style term matching) as a fallback
-  for exact product name queries like "What is the OPQ32r?" where semantic
-  similarity may not surface the right item as #1.
+- Embeddings are computed ONCE at startup and stored in the FAISS index.
+  Per-request cost is only one API call to embed the query string (~100ms).
 """
 
 import json
 import math
 import os
 import re
+import time
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
-
-# ---------------------------------------------------------------------------
-# Embedding model — loaded once at module import time (singleton pattern).
-# This means the model is warm on the first /chat call rather than cold.
-# ---------------------------------------------------------------------------
-_model = None
-
-
-def _get_model():
-    global _model
-    if _model is None:
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer("paraphrase-MiniLM-L3-v2")
-    return _model
+import requests
 
 
 # ---------------------------------------------------------------------------
-# Data classes (plain dicts kept for JSON-serializability simplicity)
+# HuggingFace Inference API embedding
+# ---------------------------------------------------------------------------
+
+HF_API_URL = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
+
+
+def _get_embeddings(texts: list[str], retries: int = 3) -> np.ndarray:
+    """
+    Gets embeddings from HuggingFace Inference API.
+    Retries on 503 (model loading) with exponential backoff.
+    """
+    token = os.environ.get("HF_TOKEN", "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    for attempt in range(retries):
+        try:
+            response = requests.post(
+                HF_API_URL,
+                headers=headers,
+                json={"inputs": texts, "options": {"wait_for_model": True}},
+                timeout=60,
+            )
+            if response.status_code == 200:
+                embeddings = np.array(response.json(), dtype=np.float32)
+                # Normalize for cosine similarity via inner product
+                norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+                norms = np.where(norms == 0, 1, norms)
+                return embeddings / norms
+            elif response.status_code == 503:
+                wait = 2 ** attempt
+                print(f"[HF API] Model loading, waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"[HF API] Error {response.status_code}: {response.text[:200]}")
+                time.sleep(1)
+        except Exception as e:
+            print(f"[HF API] Request failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(2)
+
+    # Fallback: return zero vectors (keyword search will still work)
+    print("[HF API] All retries failed, using zero embeddings as fallback")
+    dim = 384  # all-MiniLM-L6-v2 dimension
+    return np.zeros((len(texts), dim), dtype=np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Catalog item wrapper
 # ---------------------------------------------------------------------------
 
 class CatalogItem:
-    """Thin wrapper so the rest of the app can use dot-access on catalog records."""
     __slots__ = ("id", "slug", "name", "url", "test_type", "categories",
                  "description", "duration", "languages", "job_levels",
                  "remote", "adaptive")
@@ -79,15 +106,6 @@ class CatalogItem:
         return {s: getattr(self, s) for s in self.__slots__}
 
     def embed_text(self) -> str:
-        """
-        The text we actually embed for this item.
-
-        We concatenate every semantically useful field so that queries like
-        "senior leadership personality" surface OPQ32r even though the word
-        "leadership" doesn't appear in the OPQ product description itself —
-        it appears in its job_levels list. Likewise "contact centre simulation"
-        will hit items whose categories include "Simulations".
-        """
         parts = [
             self.name,
             self.description,
@@ -98,111 +116,78 @@ class CatalogItem:
 
 
 # ---------------------------------------------------------------------------
-# Index — built once at startup, reused for the lifetime of the process
+# FAISS index — built once at startup
 # ---------------------------------------------------------------------------
 
 class CatalogIndex:
     def __init__(self, catalog_path: str | Path):
-        import faiss  # imported here so the module doesn't crash if faiss isn't installed yet
+        import faiss
 
         catalog_path = Path(catalog_path)
         raw = json.loads(catalog_path.read_text(encoding="utf-8"))
         self.items: list[CatalogItem] = [CatalogItem(d) for d in raw]
 
-        # Build embeddings
-        model = _get_model()
+        print(f"Building embeddings for {len(self.items)} catalog items via HF API...")
         texts = [item.embed_text() for item in self.items]
-        embeddings = model.encode(texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
-        embeddings = embeddings.astype(np.float32)
 
-        # FAISS flat inner-product index.
-        # Because we normalize embeddings above, inner product == cosine similarity.
-        # Flat = exact search (no approximation). Correct choice for 377 items.
+        # Embed in batches to avoid API limits
+        batch_size = 64
+        all_embeddings = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            batch_embeddings = _get_embeddings(batch)
+            all_embeddings.append(batch_embeddings)
+            if i + batch_size < len(texts):
+                time.sleep(0.5)  # Rate limit respect
+
+        embeddings = np.vstack(all_embeddings).astype(np.float32)
+
+        # FAISS flat inner-product index (exact search, correct for <1000 items)
         dim = embeddings.shape[1]
         self.index = faiss.IndexFlatIP(dim)
         self.index.add(embeddings)
 
-        # Keep a slug → item lookup for direct URL validation
         self.by_slug: dict[str, CatalogItem] = {item.slug: item for item in self.items}
         self.by_url: dict[str, CatalogItem] = {item.url.rstrip("/"): item for item in self.items}
+        print(f"Index ready: {len(self.items)} items loaded.")
 
     def semantic_search(self, query: str, top_k: int = 10) -> list[tuple[CatalogItem, float]]:
-        """
-        Returns up to top_k (item, score) pairs ranked by cosine similarity.
-        score is in [0, 1] because both query and index vectors are normalized.
-        """
-        model = _get_model()
-        q_vec = model.encode([query], normalize_embeddings=True).astype(np.float32)
+        q_vec = _get_embeddings([query]).astype(np.float32)
         scores, indices = self.index.search(q_vec, min(top_k, len(self.items)))
-        results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx >= 0:
-                results.append((self.items[idx], float(score)))
-        return results
+        return [(self.items[idx], float(score))
+                for score, idx in zip(scores[0], indices[0]) if idx >= 0]
 
     def keyword_search(self, query: str, top_k: int = 10) -> list[tuple[CatalogItem, float]]:
-        """
-        Simple TF-IDF-style term frequency match over name + description.
-        Used as a complementary signal for exact product-name queries.
-
-        WHY: Semantic search can place an item like 'OPQ32r' slightly off the
-        top if the query is a product name comparison ("difference between
-        OPQ32r and GSA") because the query vector encodes 'difference' and
-        'compare' as strong signals, potentially overweighting other items.
-        Keyword search anchors on the exact token.
-        """
         q_terms = set(re.sub(r"[^a-z0-9\s]", " ", query.lower()).split())
         if not q_terms:
             return []
-
         scored = []
         for item in self.items:
-            haystack = (item.name + " " + item.description).lower()
-            haystack = re.sub(r"[^a-z0-9\s]", " ", haystack)
-            hay_terms = haystack.split()
-            hay_term_set = set(hay_terms)
-            hay_freq = {t: hay_terms.count(t) for t in q_terms if t in hay_terms}
-
-            # Score = sum of TF * IDF approximation (log(1 + count))
-            score = sum(math.log(1 + freq) for freq in hay_freq.values())
+            haystack = re.sub(r"[^a-z0-9\s]", " ",
+                              (item.name + " " + item.description).lower()).split()
+            freq = {t: haystack.count(t) for t in q_terms if t in haystack}
+            score = sum(math.log(1 + f) for f in freq.values())
             if score > 0:
                 scored.append((item, score))
-
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:top_k]
 
     def hybrid_search(self, query: str, top_k: int = 10, alpha: float = 0.7) -> list[CatalogItem]:
-        """
-        Combines semantic and keyword search with a weighted sum.
-        alpha=0.7 means 70% semantic, 30% keyword.
+        sem = self.semantic_search(query, top_k * 2)
+        kw = self.keyword_search(query, top_k * 2)
 
-        WHY alpha=0.7: Semantic search generalizes well to paraphrased queries
-        ("I need something for senior execs" maps to OPQ even without the
-        word "OPQ"). Keyword search helps precision for exact product names.
-        0.7/0.3 is a reasonable prior; in a production system you'd tune this
-        on a labeled eval set.
-        """
-        sem_results = self.semantic_search(query, top_k=top_k * 2)
-        kw_results = self.keyword_search(query, top_k=top_k * 2)
-
-        # Normalize scores to [0,1] within each result set
-        def normalize(results: list[tuple[CatalogItem, float]]) -> dict[str, float]:
+        def norm(results):
             if not results:
                 return {}
             max_s = max(s for _, s in results) or 1.0
             return {item.slug: s / max_s for item, s in results}
 
-        sem_norm = normalize(sem_results)
-        kw_norm = normalize(kw_results)
-
-        all_slugs = set(sem_norm) | set(kw_norm)
-        combined = {
-            slug: alpha * sem_norm.get(slug, 0.0) + (1 - alpha) * kw_norm.get(slug, 0.0)
-            for slug in all_slugs
-        }
-
-        ranked_slugs = sorted(combined, key=lambda s: combined[s], reverse=True)[:top_k]
-        return [self.by_slug[s] for s in ranked_slugs]
+        sem_n, kw_n = norm(sem), norm(kw)
+        all_slugs = set(sem_n) | set(kw_n)
+        combined = {s: alpha * sem_n.get(s, 0) + (1 - alpha) * kw_n.get(s, 0)
+                    for s in all_slugs}
+        ranked = sorted(combined, key=lambda s: combined[s], reverse=True)[:top_k]
+        return [self.by_slug[s] for s in ranked]
 
     def get_by_url(self, url: str) -> Optional[CatalogItem]:
         return self.by_url.get(url.rstrip("/"))
