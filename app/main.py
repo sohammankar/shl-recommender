@@ -24,7 +24,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 
 load_dotenv()  # reads .env file if present (local dev); on Render, env vars are set via dashboard
@@ -101,6 +102,14 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+_static_dir = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def index():
+    return FileResponse(_static_dir / "index.html")
 
 
 # ---------------------------------------------------------------------------

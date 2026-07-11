@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SHL Assessment Recommender</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #f5f5f5;
+      --surface: #ffffff;
+      --border: #e0e0e0;
+      --primary: #d0021b;
+      --primary-dark: #a80016;
+      --user-bubble: #d0021b;
+      --assistant-bubble: #f0f0f0;
+      --text: #1a1a1a;
+      --text-muted: #666;
+      --text-on-primary: #fff;
+      --shadow: 0 2px 12px rgba(0,0,0,0.08);
+      --radius: 12px;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    header {
+      width: 100%;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header .logo {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--primary);
+      letter-spacing: -0.5px;
+    }
+
+    header .subtitle {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    header .badge {
+      margin-left: auto;
+      font-size: 11px;
+      background: #fff3cd;
+      border: 1px solid #ffc107;
+      color: #856404;
+      padding: 3px 8px;
+      border-radius: 20px;
+    }
+
+    .chat-wrapper {
+      width: 100%;
+      max-width: 760px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .msg {
+      display: flex;
+      flex-direction: column;
+      max-width: 82%;
+    }
+
+    .msg.user { align-self: flex-end; align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+    .bubble {
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      font-size: 14px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .msg.user .bubble {
+      background: var(--user-bubble);
+      color: var(--text-on-primary);
+      border-bottom-right-radius: 4px;
+    }
+
+    .msg.assistant .bubble {
+      background: var(--assistant-bubble);
+      color: var(--text);
+      border-bottom-left-radius: 4px;
+    }
+
+    .recommendations {
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .rec-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      box-shadow: var(--shadow);
+    }
+
+    .rec-info { display: flex; flex-direction: column; gap: 2px; }
+
+    .rec-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .rec-type {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .rec-link {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--primary);
+      text-decoration: none;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .rec-link:hover { text-decoration: underline; }
+
+    .typing-indicator {
+      display: flex;
+      gap: 4px;
+      padding: 14px 16px;
+      background: var(--assistant-bubble);
+      border-radius: var(--radius);
+      border-bottom-left-radius: 4px;
+      width: fit-content;
+    }
+
+    .typing-indicator span {
+      width: 7px; height: 7px;
+      background: #999;
+      border-radius: 50%;
+      animation: bounce 1.2s infinite;
+    }
+    .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+    .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes bounce {
+      0%, 60%, 100% { transform: translateY(0); }
+      30% { transform: translateY(-6px); }
+    }
+
+    .input-area {
+      padding: 16px;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    #user-input {
+      flex: 1;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-family: inherit;
+      resize: none;
+      outline: none;
+      max-height: 120px;
+      overflow-y: auto;
+      line-height: 1.5;
+      color: var(--text);
+      background: var(--bg);
+      transition: border-color 0.15s;
+    }
+
+    #user-input:focus { border-color: var(--primary); }
+
+    #send-btn {
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    #send-btn:hover:not(:disabled) { background: var(--primary-dark); }
+    #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .system-msg {
+      align-self: center;
+      font-size: 12px;
+      color: var(--text-muted);
+      background: var(--border);
+      padding: 4px 12px;
+      border-radius: 20px;
+    }
+
+    #reset-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      color: var(--text-muted);
+      transition: border-color 0.15s;
+      flex-shrink: 0;
+    }
+
+    #reset-btn:hover { border-color: var(--primary); color: var(--primary); }
+
+    .type-labels {
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: #e8f0fe;
+      color: #1a73e8;
+      font-weight: 500;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="logo">SHL</div>
+    <div class="subtitle">Assessment Recommender</div>
+  </div>
+  <div class="badge">⚠ Free tier — first response may take 2–3 min</div>
+</header>
+
+<div class="chat-wrapper">
+  <div id="messages">
+    <div class="msg assistant">
+      <div class="bubble">Hi! I help you find the right SHL assessments for your hiring needs.
+
+Tell me about the role you're hiring for — job title, required skills, seniority level, or any specific competencies you want to evaluate.</div>
+    </div>
+  </div>
+
+  <div class="input-area">
+    <button id="reset-btn" title="Start over">↺ New chat</button>
+    <textarea id="user-input" rows="1" placeholder="e.g. I'm hiring a mid-level Java developer…"></textarea>
+    <button id="send-btn">Send</button>
+  </div>
+</div>
+
+<script>
+  const messagesEl = document.getElementById('messages');
+  const inputEl = document.getElementById('user-input');
+  const sendBtn = document.getElementById('send-btn');
+  const resetBtn = document.getElementById('reset-btn');
+
+  let history = [];
+  let busy = false;
+
+  const TYPE_MAP = {
+    A: 'Ability & Aptitude', B: 'Biodata & Situational Judgement',
+    C: 'Competencies', D: 'Development & 360',
+    E: 'Assessment Exercises', K: 'Knowledge & Skills',
+    P: 'Personality & Behavior', S: 'Simulations'
+  };
+
+  function scrollToBottom() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function addSystemMsg(text) {
+    const el = document.createElement('div');
+    el.className = 'system-msg';
+    el.textContent = text;
+    messagesEl.appendChild(el);
+    scrollToBottom();
+  }
+
+  function addMessage(role, text, recommendations = []) {
+    const msg = document.createElement('div');
+    msg.className = `msg ${role}`;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+    msg.appendChild(bubble);
+
+    if (recommendations.length > 0) {
+      const recsEl = document.createElement('div');
+      recsEl.className = 'recommendations';
+      recommendations.forEach(rec => {
+        const card = document.createElement('div');
+        card.className = 'rec-card';
+
+        const info = document.createElement('div');
+        info.className = 'rec-info';
+
+        const name = document.createElement('div');
+        name.className = 'rec-name';
+        name.textContent = rec.name;
+
+        const type = document.createElement('div');
+        type.className = 'rec-type';
+        type.textContent = TYPE_MAP[rec.test_type] || rec.test_type;
+
+        info.appendChild(name);
+        info.appendChild(type);
+
+        const link = document.createElement('a');
+        link.className = 'rec-link';
+        link.href = rec.url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = 'View →';
+
+        card.appendChild(info);
+        card.appendChild(link);
+        recsEl.appendChild(card);
+      });
+      msg.appendChild(recsEl);
+    }
+
+    messagesEl.appendChild(msg);
+    scrollToBottom();
+  }
+
+  function showTyping() {
+    const el = document.createElement('div');
+    el.className = 'msg assistant';
+    el.id = 'typing';
+    el.innerHTML = `<div class="typing-indicator"><span></span><span></span><span></span></div>`;
+    messagesEl.appendChild(el);
+    scrollToBottom();
+    return el;
+  }
+
+  function removeTyping() {
+    document.getElementById('typing')?.remove();
+  }
+
+  async function send() {
+    const text = inputEl.value.trim();
+    if (!text || busy) return;
+
+    busy = true;
+    sendBtn.disabled = true;
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+
+    history.push({ role: 'user', content: text });
+    addMessage('user', text);
+
+    const typing = showTyping();
+
+    try {
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: history }),
+      });
+
+      removeTyping();
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        if (res.status === 503) {
+          addSystemMsg('Server is still starting up — please wait a moment and try again.');
+        } else {
+          addSystemMsg(`Error ${res.status}: ${err.detail || 'Something went wrong.'}`);
+        }
+        history.pop();
+        return;
+      }
+
+      const data = await res.json();
+      history.push({ role: 'assistant', content: data.reply });
+      addMessage('assistant', data.reply, data.recommendations);
+
+      if (data.end_of_conversation) {
+        addSystemMsg('Conversation complete. Click "New chat" to start over.');
+        sendBtn.disabled = true;
+        inputEl.disabled = true;
+      }
+
+    } catch (e) {
+      removeTyping();
+      addSystemMsg('Network error — is the server awake? Try again in a moment.');
+      history.pop();
+    } finally {
+      busy = false;
+      if (!inputEl.disabled) sendBtn.disabled = false;
+    }
+  }
+
+  sendBtn.addEventListener('click', send);
+
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+  });
+
+  resetBtn.addEventListener('click', () => {
+    history = [];
+    messagesEl.innerHTML = '';
+    sendBtn.disabled = false;
+    inputEl.disabled = false;
+    addMessage('assistant', 'Hi! I help you find the right SHL assessments for your hiring needs.\n\nTell me about the role you\'re hiring for — job title, required skills, seniority level, or any specific competencies you want to evaluate.');
+  });
+</script>
+</body>
+</html>
