@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: shl-recommender
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: CATALOG_PATH
+        value: data/catalog.json
+      - key: EMBED_CACHE_PATH
+        value: data/embeddings_cache.npy
+    healthCheckPath: /health

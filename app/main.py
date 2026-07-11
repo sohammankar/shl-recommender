@@ -120,13 +120,6 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/debug/retrieve")
-def debug_retrieve(q: str):
-    """Debug endpoint — shows what items retrieval returns for a query. Remove before final submission."""
-    if not hasattr(app.state, "index"):
-        raise HTTPException(status_code=503, detail="Not ready")
-    items = app.state.index.hybrid_search(q, top_k=10)
-    return {"query": q, "results": [{"name": i.name, "slug": i.slug, "test_type": i.test_type} for i in items]}
 
 
 @app.post("/chat", response_model=ChatResponse)

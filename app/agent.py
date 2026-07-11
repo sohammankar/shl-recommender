@@ -243,11 +243,9 @@ def _get_pinned_slugs(query: str) -> list[str]:
 def _build_catalog_context(items: list[CatalogItem]) -> str:
     lines = []
     for item in items:
-        desc = item.description[:120].strip()
+        desc = item.description[:80].strip()
         lines.append(
-            f"- name: {item.name} | url: {item.url} | "
-            f"test_type: {item.test_type} | duration: {item.duration or 'unspecified'} | "
-            f"desc: {desc}"
+            f"{item.name} | {item.url} | type:{item.test_type} | {desc}"
         )
     return "\n".join(lines)
 
@@ -323,13 +321,16 @@ def chat(messages: list[dict], index: CatalogIndex) -> dict:
     # Sending 20 catalog items + long history pushes total tokens above the
     # point where Groq can respond within the 30s timeout. We reduce the
     # catalog window on later turns since context is already established.
+    # Cap catalog context tightly to control token usage.
+    # Pinning logic already ensures the right flagship items are included;
+    # extra hybrid results add breadth but at a token cost.
     turn_count = len(messages)
     if turn_count <= 2:
-        max_catalog = 20
-    elif turn_count <= 4:
-        max_catalog = 15
-    else:
         max_catalog = 12
+    elif turn_count <= 4:
+        max_catalog = 10
+    else:
+        max_catalog = 8
 
     all_candidates = all_candidates[:max_catalog]
 
@@ -339,10 +340,10 @@ def chat(messages: list[dict], index: CatalogIndex) -> dict:
     # as the user already saw them. We keep user turns intact.
     trimmed_messages = []
     for m in messages:
-        if m["role"] == "assistant" and len(m["content"]) > 300:
+        if m["role"] == "assistant" and len(m["content"]) > 150:
             trimmed_messages.append({
                 "role": "assistant",
-                "content": m["content"][:300] + "..."
+                "content": m["content"][:150] + "..."
             })
         else:
             trimmed_messages.append(m)
@@ -355,7 +356,7 @@ def chat(messages: list[dict], index: CatalogIndex) -> dict:
         model=model,
         messages=[{"role": "system", "content": system_prompt}, *trimmed_messages],
         temperature=0.1,
-        max_tokens=800,
+        max_tokens=500,
         response_format={"type": "json_object"},
     )
 
