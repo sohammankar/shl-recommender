@@ -1,29 +1,18 @@
 """
-eval.py — Local evaluation harness
+eval.py — Evaluation harness
 
-Replays the 10 public conversation traces and measures:
+Replays 10 conversation traces and measures:
   1. Schema compliance — does every response have the right shape?
-  2. Recall@10 — are the expected assessments in our final recommendations?
-  3. Behavior probes — does the agent clarify before recommending? does it
-     refuse off-topic queries? does it honor refinements?
+  2. Recall@10 — are the expected assessments in the final recommendations?
+  3. Behavior probes — does the agent clarify, refuse off-topic queries,
+     and honor refinements correctly?
 
-Run against a LOCAL server:
-    # Terminal 1:
+Run against a local server:
     uvicorn app.main:app --reload --port 8000
-
-    # Terminal 2:
     python scripts/eval.py --url http://localhost:8000
 
-Run against the deployed server:
-    python scripts/eval.py --url https://your-render-url.onrender.com
-
-WHY WE HAVE A LOCAL EVAL:
-The SHL grader runs the same kind of replay. By running it ourselves first,
-we can identify which traces are failing (and why) before submission.
-Recall@10 gaps almost always trace back to either (a) a retrieval miss
-(the right item wasn't in the top-15 candidates given to the LLM) or
-(b) a prompt issue (the LLM chose not to include a relevant item).
-The eval script prints per-trace breakdowns so you can pinpoint which.
+Run against the deployed instance:
+    python scripts/eval.py --url https://shl-recommender-wtwd.onrender.com
 """
 
 import argparse
@@ -35,14 +24,9 @@ from pathlib import Path
 
 import httpx
 
-# ---------------------------------------------------------------------------
-# Ground-truth shortlists extracted from the 10 conversation traces.
-# Each entry is a list of canonical SHL catalog URLs that the final
-# recommendation turn should include.
-# ---------------------------------------------------------------------------
-
-# These are derived directly from C1.md - C10.md, from the LAST turn
-# in each conversation that contains a recommendations table.
+# Ground-truth shortlists for 10 conversation scenarios.
+# Each entry contains the expected URLs that the final recommendation turn
+# should include, and the user turns to replay.
 GROUND_TRUTH: dict[str, dict] = {
     "C1": {
         "description": "Senior leadership / CXO selection with OPQ + reports",
@@ -376,9 +360,9 @@ def main():
     print(f"  Traces run: {len(results)}")
 
     if mean_recall < 0.5:
-        print("\n  [!] Mean Recall below 0.5 — check retrieval (are expected items in top-15 candidates?)")
+        print("\n  [!] Mean Recall below 0.5 — check retrieval (are expected items in the top-15 candidates?)")
     if total_schema_errors > 0:
-        print(f"\n  [!] {total_schema_errors} schema errors — these will fail the hard eval. Fix before submitting.")
+        print(f"\n  [!] {total_schema_errors} schema errors — fix before deploying.")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,6 @@
 agent.py — Conversational agent logic
 
 Single LLM call per turn with pre-retrieval grounding.
-Key design decisions documented inline for interview defensibility.
 """
 
 import json
@@ -123,11 +122,9 @@ def _get_pinned_slugs(query: str) -> list[str]:
     """
     Returns slugs to always inject based on domain signals in the query.
 
-    WHY: Retrieval is probabilistic. Flagship items sometimes rank just
-    outside the top-15 window because niche variants have higher vocabulary
-    overlap with specific query terms. Pinning them when signals are present
-    is domain knowledge injected into retrieval, not hardcoding — the LLM
-    still decides whether to include each item based on context.
+    Retrieval is probabilistic — flagship items can rank outside the top-15
+    window when niche variants have higher vocabulary overlap. Pinning by
+    domain signal is a soft hint: the LLM still decides what to recommend.
     """
     q = query.lower()
     pins = []
@@ -316,14 +313,8 @@ def chat(messages: list[dict], index: CatalogIndex) -> dict:
     extra_from_hybrid = [item for item in candidate_items if item.slug not in pinned_slug_set]
     all_candidates = pinned_items + extra_from_hybrid
 
-    # Scale catalog context size based on conversation length.
-    # WHY: On later turns (turn 5+) the conversation history itself is large.
-    # Sending 20 catalog items + long history pushes total tokens above the
-    # point where Groq can respond within the 30s timeout. We reduce the
-    # catalog window on later turns since context is already established.
-    # Cap catalog context tightly to control token usage.
-    # Pinning logic already ensures the right flagship items are included;
-    # extra hybrid results add breadth but at a token cost.
+    # Shrink catalog context on later turns — conversation history grows, so
+    # we trade breadth for staying within the token budget.
     turn_count = len(messages)
     if turn_count <= 2:
         max_catalog = 12
@@ -334,10 +325,8 @@ def chat(messages: list[dict], index: CatalogIndex) -> dict:
 
     all_candidates = all_candidates[:max_catalog]
 
-    # Trim assistant message content in history to reduce token count.
-    # Long assistant replies from earlier turns are not needed verbatim —
-    # only the recommendations JSON matters, and those are in the history
-    # as the user already saw them. We keep user turns intact.
+    # Truncate long assistant turns in history — the full prose isn't needed
+    # for context, and trimming keeps token usage stable across long sessions.
     trimmed_messages = []
     for m in messages:
         if m["role"] == "assistant" and len(m["content"]) > 150:

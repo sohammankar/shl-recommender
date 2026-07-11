@@ -1,104 +1,132 @@
 # SHL Assessment Recommender
 
-Conversational agent for selecting SHL assessments, built for the SHL Labs AI Intern take-home assignment.
+A conversational AI agent that recommends SHL psychometric assessments for hiring scenarios. Given a job description or natural-language description of a role, it asks clarifying questions and returns a grounded shortlist of assessments — with links to the SHL product catalog.
 
-## Architecture at a glance
+**Live demo:** https://shl-recommender-wtwd.onrender.com
+> Hosted on Render's free tier — first load may take **2–3 minutes** to spin up.
+
+---
+
+## How it works
 
 ```
-POST /chat (stateless)
+User message
   │
-  ├─ 1. Build retrieval query from conversation history (last 3 user turns)
-  ├─ 2. Hybrid search: FAISS semantic (70%) + keyword BM25 (30%) → top 15 candidates
-  ├─ 3. Inject candidates as grounded context into LLM system prompt
-  ├─ 4. Call Groq (Llama 3.3 70B) with conversation history
-  ├─ 5. Parse JSON response
-  └─ 6. Validate every recommended URL against catalog → return
+  ├─ 1. Build retrieval query from conversation history (last N user turns)
+  ├─ 2. Domain pinning — always inject flagship items (OPQ32r, Verify G+, etc.)
+  │      when signals in the query suggest they're relevant
+  ├─ 3. Hybrid search: FAISS semantic (70%) + BM25 keyword (30%) → top candidates
+  ├─ 4. Inject candidates as grounded context into LLM system prompt
+  ├─ 5. Single Groq API call (Llama 3.3 70B) with conversation history
+  ├─ 6. Parse JSON response
+  └─ 7. Validate every recommended URL against catalog before returning
 ```
 
-**Key design decisions:**
-- **Local embeddings** (`all-MiniLM-L6-v2`) — no paid API, no rate limits, 377 items fits in RAM
-- **FAISS flat index** — exact search, correct for <1000 items (no approximation needed)
-- **Hybrid retrieval** — semantic for paraphrased queries, keyword for exact product names
-- **Single LLM call per turn** — stays within 30s timeout, easier to debug than multi-step pipelines
-- **URL validation layer** — every recommendation is cross-checked against the catalog before returning
+### Key design decisions
 
-## Setup
+| Decision | Rationale |
+|---|---|
+| **Stateless API** | Caller sends full history each turn — no server-side session state, trivially scalable |
+| **Hybrid retrieval** | Semantic search handles paraphrased queries; keyword covers exact product names |
+| **FAISS flat index** | Exact search is correct for 377 items — no approximation needed |
+| **Domain pinning** | Retrieval is probabilistic; flagship items get pinned when domain signals are present so they're never silently dropped from context |
+| **Single LLM call per turn** | Avoids multi-step pipeline complexity; stays within timeout budget |
+| **URL validation layer** | Every recommendation is cross-checked against the catalog — hallucinated URLs are rejected before they reach the caller |
+| **HF Inference API fallback** | If local sentence-transformers aren't available (RAM-constrained deploy), embeddings fall back to HuggingFace's hosted API |
 
-### 1. Prerequisites
+---
+
+## Tech stack
+
+- **FastAPI** — API framework
+- **FAISS** — vector similarity search
+- **Groq** (Llama 3.3 70B) — LLM inference
+- **sentence-transformers** (`all-MiniLM-L6-v2`) — local embeddings with HF API fallback
+- **Render** — deployment (free tier)
+
+---
+
+## Local setup
+
+### Prerequisites
 - Python 3.11+
-- A free Groq API key from https://console.groq.com
+- Groq API key — [console.groq.com](https://console.groq.com) (free)
+- HuggingFace token (optional) — [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
 
-### 2. Install dependencies
+### Install
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Build the catalog index
-```bash
-python scripts/build_catalog.py
-```
-This normalizes `data/shl_product_catalog.json` into `data/catalog.json`.
-The FAISS index itself is built in memory at server startup.
+### Environment variables
 
-### 4. Set environment variables
 ```bash
 cp .env.example .env
-# Edit .env and paste your GROQ_API_KEY
+# Add your GROQ_API_KEY (and optionally HF_TOKEN) to .env
 ```
 
-### 5. Run locally
+### Run
+
 ```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 6. Test it
-```bash
-# Health check
-curl http://localhost:8000/health
+Open http://localhost:8000 for the chat UI, or use the API directly:
 
-# Single chat turn
+```bash
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
   -d '{
     "messages": [
-      {"role": "user", "content": "I am hiring a Java developer who works with stakeholders"}
+      {"role": "user", "content": "I am hiring a senior Java developer"}
     ]
   }'
-
-# Run the full evaluation harness against your local server
-python scripts/eval.py --url http://localhost:8000
 ```
 
-## Deployment (Render)
+### Rebuild the catalog index
 
-1. Push this repo to GitHub (include `data/shl_product_catalog.json`)
-2. Go to https://render.com → New → Web Service → connect your GitHub repo
-3. Render will auto-detect `render.yaml`
-4. In the Render dashboard → Environment → add `GROQ_API_KEY` = your key
-5. Deploy. First startup takes ~60-90s (model download). Subsequent restarts are faster.
-6. Your endpoint will be: `https://shl-recommender.onrender.com`
+The normalized `data/catalog.json` is committed, so this is only needed if you update the raw source data:
 
-## API Reference
+```bash
+python scripts/build_catalog.py
+```
 
-### GET /health
-Returns `{"status": "ok"}` with HTTP 200 when ready.
+### Run the evaluation harness
 
-### POST /chat
-**Request:**
+Replays 10 conversation scenarios and measures Recall@10 + schema compliance:
+
+```bash
+python scripts/eval.py --url http://localhost:8000
+# or against the live instance:
+python scripts/eval.py --url https://shl-recommender-wtwd.onrender.com
+```
+
+---
+
+## API reference
+
+### `GET /health`
+
+Returns `{"status": "ok"}` once the catalog index is ready. Returns `503` during startup.
+
+### `POST /chat`
+
+**Request**
 ```json
 {
   "messages": [
     {"role": "user", "content": "I need to hire a Java developer"},
-    {"role": "assistant", "content": "What is their seniority level?"},
-    {"role": "user", "content": "Mid-level, around 4 years"}
+    {"role": "assistant", "content": "What seniority level?"},
+    {"role": "user", "content": "Mid-level, around 4 years experience"}
   ]
 }
 ```
 
-**Response:**
+**Response**
 ```json
 {
-  "reply": "Here are 4 assessments for a mid-level Java developer...",
+  "reply": "Here are 5 assessments for a mid-level Java developer...",
   "recommendations": [
     {
       "name": "Core Java (Advanced Level) (New)",
@@ -110,5 +138,19 @@ Returns `{"status": "ok"}` with HTTP 200 when ready.
 }
 ```
 
-`recommendations` is `[]` when the agent is clarifying or refusing.
-`end_of_conversation` is `true` only when the user confirms the final shortlist.
+- `recommendations` is `[]` when the agent is clarifying, refusing, or comparing
+- `end_of_conversation` is `true` when the user confirms the final shortlist
+- `test_type` codes: `A` Ability, `B` Biodata/SJT, `C` Competencies, `D` Development, `K` Knowledge, `P` Personality, `S` Simulations, `E` Exercises
+
+---
+
+## Deployment
+
+The repo includes `render.yaml` — connect it to Render and set two env vars:
+
+| Variable | Value |
+|---|---|
+| `GROQ_API_KEY` | From [console.groq.com](https://console.groq.com) |
+| `HF_TOKEN` | From [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) |
+
+Render auto-deploys on every push to `main`. Cold starts rebuild the embedding cache (~2–3 min); subsequent restarts load from disk and are fast.
