@@ -5,6 +5,8 @@ A conversational AI agent that recommends SHL psychometric assessments for hirin
 **Live demo:** https://shl-recommender-wtwd.onrender.com
 > Hosted on Render's free tier — first load may take **2–3 minutes** to spin up.
 
+![SHL Assessment Recommender screenshot](docs/screenshot.png)
+
 ---
 
 ## How it works
